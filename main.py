@@ -47,57 +47,83 @@ def process_camera():
     cap = cv2.VideoCapture(0)
     video = None
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+    try:
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-        frame = cv2.flip(frame, 1)
-        h, w, _ = frame.shape
-        center_x, center_y = w // 2 - template_w // 2, h // 2 - template_h // 2
-        overlay_image_alpha(frame, template, (center_x, center_y))
+            frame = cv2.flip(frame, 1)
+            h, w, _ = frame.shape
+            center_x, center_y = w // 2 - template_w // 2, h // 2 - template_h // 2
+            overlay_image_alpha(frame, template, (center_x, center_y))
 
-        # Hand detection
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb)
+            # Hand detection
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = hands.process(rgb)
 
-        hand_in_position = False
+            hand_in_position = False
 
-        if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-                x_coords = [lm.x for lm in hand_landmarks.landmark]
-                y_coords = [lm.y for lm in hand_landmarks.landmark]
-                x_min, x_max = int(min(x_coords) * w), int(max(x_coords) * w)
-                y_min, y_max = int(min(y_coords) * h), int(max(y_coords) * h)
+            if results.multi_hand_landmarks:
+                for hand_landmarks in results.multi_hand_landmarks:
+                    mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                    x_coords = [lm.x for lm in hand_landmarks.landmark]
+                    y_coords = [lm.y for lm in hand_landmarks.landmark]
+                    x_min, x_max = int(min(x_coords) * w), int(max(x_coords) * w)
+                    y_min, y_max = int(min(y_coords) * h), int(max(y_coords) * h)
 
-                if (center_x < x_min < center_x + template_w and
-                    center_y < y_min < center_y + template_h and
-                    center_x < x_max < center_x + template_w and
-                    center_y < y_max < center_y + template_h):
-                    hand_in_position = True
-                    cv2.putText(frame, '✅ Hand in correct position!',
-                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    if (center_x < x_min < center_x + template_w and
+                        center_y < y_min < center_y + template_h and
+                        center_x < x_max < center_x + template_w and
+                        center_y < y_max < center_y + template_h):
+                        hand_in_position = True
+                        cv2.putText(frame, '✅ Hand in correct position!',
+                                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        if hand_in_position and hand_was_outside:
-            hand_was_outside = False
-            video_triggered = True
-            # Once video is triggered, keep it playing until it ends
-            hand_was_outside = False
-            # Open video file
-            video = cv2.VideoCapture('static/vid.mp4')
-            if not video.isOpened():
-                print("Error: Could not open video file")
-                video = None
+            if hand_in_position and hand_was_outside:
+                hand_was_outside = False
+                video_triggered = True
+                # Open video file
+                video = cv2.VideoCapture('static/vid.mp4')
+                if not video.isOpened():
+                    print("Error: Could not open video file")
+                    video = None
 
-        if video_triggered and video is not None:
-            ret, video_frame = video.read()
-            if ret:
-                # Resize video frame to match camera feed
-                video_frame = cv2.resize(video_frame, (w, h))
-                # Overlay video on camera feed
-                alpha = 0.7  # Adjust transparency (0.0 to 1.0)
-                frame = cv2.addWeighted(frame, 1 - alpha, video_frame, alpha, 0)
+            if video_triggered and video is not None:
+                ret, video_frame = video.read()
+                if ret:
+                    # Resize video frame to match camera feed
+                    video_frame = cv2.resize(video_frame, (w, h))
+                    # Overlay video on camera feed
+                    alpha = 0.7  # Adjust transparency (0.0 to 1.0)
+                    frame = cv2.addWeighted(frame, 1 - alpha, video_frame, alpha, 0)
+                else:
+                    # Video has ended
+                    video.release()
+                    video = None
+                    video_triggered = False
+                    hand_was_outside = True
+                    # Release camera while video is playing
+                    cap.release()
+                    cap = cv2.VideoCapture(0)
+                    if not cap.isOpened():
+                        print("Error: Could not reopen camera")
+                        break
+
+            # If video is playing, don't show camera feed
+            if video_triggered and video is not None:
+                frame = np.zeros((h, w, 3), dtype=np.uint8)  # Blank frame
+
+            frame_queue.put(frame)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # Cleanup
+        if cap.isOpened():
+            cap.release()
+        if video is not None:
+            video.release()
 
         _, buffer = cv2.imencode('.jpg', frame)
         if buffer is not None and frame_queue.qsize() < 10:

@@ -9,9 +9,13 @@ import os
 app = Flask(__name__)
 
 # Load hand template image
-template = cv2.imread('static/hand_template.png', cv2.IMREAD_UNCHANGED)
-if template is None:
+original_template = cv2.imread('static/hand_template.png', cv2.IMREAD_UNCHANGED)
+if original_template is None:
     raise FileNotFoundError("hand_template.png not found in static/ folder.")
+
+# Scale the template to make it larger (1.5x)
+scale_factor = 1.5
+template = cv2.resize(original_template, None, fx=scale_factor, fy=scale_factor)
 template_h, template_w = template.shape[:2]
 
 # Queue for frames
@@ -44,15 +48,27 @@ def overlay_image_alpha(img, img_overlay, pos):
 
 def process_camera():
     global video_triggered, hand_was_outside
-    cap = cv2.VideoCapture(0)
+    cap = None
     video = None
+    video_playing = False
 
-    try:
-        while cap.isOpened():
+    while True:
+        # Open camera only if video is not playing
+        if not video_playing:
+            if cap is None:
+                cap = cv2.VideoCapture(0)
+                if not cap.isOpened():
+                    print("Error: Could not open webcam")
+                    break
             ret, frame = cap.read()
             if not ret:
                 break
+        else:
+            if cap is not None:
+                cap.release()
+                cap = None
 
+        if not video_playing:
             frame = cv2.flip(frame, 1)
             h, w, _ = frame.shape
             center_x, center_y = w // 2 - template_w // 2, h // 2 - template_h // 2
@@ -83,14 +99,27 @@ def process_camera():
             if hand_in_position and hand_was_outside:
                 hand_was_outside = False
                 video_triggered = True
+                video_playing = True
                 # Open video file
                 video = cv2.VideoCapture('static/vid.mp4')
                 if not video.isOpened():
                     print("Error: Could not open video file")
                     video = None
+                    video_playing = False
+                    video_triggered = False
 
-            if video_triggered and video is not None:
-                ret, video_frame = video.read()
+        if video_playing and video is not None:
+            ret, video_frame = video.read()
+            if ret:
+                # Resize video frame to match camera feed
+                video_frame = cv2.resize(video_frame, (w, h))
+                # Overlay video on camera feed
+                alpha = 0.7  # Adjust transparency (0.0 to 1.0)
+                frame = cv2.addWeighted(frame, 1 - alpha, video_frame, alpha, 0)
+            else:
+                # Video ended, restart it from the beginning
+                video.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Reset video to frame 0
+                ret, video_frame = video.read()  # Read first frame
                 if ret:
                     # Resize video frame to match camera feed
                     video_frame = cv2.resize(video_frame, (w, h))
@@ -98,38 +127,75 @@ def process_camera():
                     alpha = 0.7  # Adjust transparency (0.0 to 1.0)
                     frame = cv2.addWeighted(frame, 1 - alpha, video_frame, alpha, 0)
                 else:
-                    # Video has ended
+                    print("Error: Could not read video frame after restart")
                     video.release()
                     video = None
+                    video_playing = False
                     video_triggered = False
                     hand_was_outside = True
-                    # Release camera while video is playing
-                    cap.release()
-                    cap = cv2.VideoCapture(0)
-                    if not cap.isOpened():
-                        print("Error: Could not reopen camera")
-                        break
-
-            # If video is playing, don't show camera feed
-            if video_triggered and video is not None:
-                frame = np.zeros((h, w, 3), dtype=np.uint8)  # Blank frame
-
-            frame_queue.put(frame)
-
-    except KeyboardInterrupt:
-        pass
-    finally:
-        # Cleanup
-        if cap.isOpened():
-            cap.release()
-        if video is not None:
-            video.release()
 
         _, buffer = cv2.imencode('.jpg', frame)
         if buffer is not None and frame_queue.qsize() < 10:
             frame_queue.put(buffer.tobytes())
 
-    cap.release()
+    if cap is not None:
+        cap.release()
+    if video is not None:
+        video.release()
+
+        frame = cv2.flip(frame, 1)
+        h, w, _ = frame.shape
+        center_x, center_y = w // 2 - template_w // 2, h // 2 - template_h // 2
+        overlay_image_alpha(frame, template, (center_x, center_y))
+
+        # Hand detection
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = hands.process(rgb)
+
+        hand_in_position = False
+
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                x_coords = [lm.x for lm in hand_landmarks.landmark]
+                y_coords = [lm.y for lm in hand_landmarks.landmark]
+                x_min, x_max = int(min(x_coords) * w), int(max(x_coords) * w)
+                y_min, y_max = int(min(y_coords) * h), int(max(y_coords) * h)
+
+                if (center_x < x_min < center_x + template_w and
+                    center_y < y_min < center_y + template_h and
+                    center_x < x_max < center_x + template_w and
+                    center_y < y_max < center_y + template_h):
+                    hand_in_position = True
+                    cv2.putText(frame, '✅ Hand in correct position!',
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+        if hand_in_position and hand_was_outside:
+            hand_was_outside = False
+            video_triggered = True
+            # Once video is triggered, keep it playing until it ends
+            hand_was_outside = False
+            # Open video file
+            video = cv2.VideoCapture('static/vid.mp4')
+            if not video.isOpened():
+                print("Error: Could not open video file")
+                video = None
+
+        if video_triggered and video is not None:
+            ret, video_frame = video.read()
+            if ret:
+                # Resize video frame to match camera feed
+                video_frame = cv2.resize(video_frame, (w, h))
+                # Overlay video on camera feed
+                alpha = 0.7  # Adjust transparency (0.0 to 1.0)
+                frame = cv2.addWeighted(frame, 1 - alpha, video_frame, alpha, 0)
+
+        _, buffer = cv2.imencode('.jpg', frame)
+        if buffer is not None and frame_queue.qsize() < 10:
+            frame_queue.put(buffer.tobytes())
+
+    if cap is not None:
+        cap.release()
     if video is not None:
         video.release()
 
